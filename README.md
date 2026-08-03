@@ -280,4 +280,9 @@ AI Engineering Assessment Project
 This project was developed as part of an AI Engineering assessment and is intended for educational and demonstration purposes.
 
 ## Demo 
+
+```bash
+
 https://research-agent-hgftpp2haaj9vammgzcczu.streamlit.app/
+
+```
