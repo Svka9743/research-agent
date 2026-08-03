@@ -1,136 +1,278 @@
+"""
+ResearchMind AI
+================
+A Retrieval-Augmented Generation (RAG) research assistant built with
+Streamlit, LangChain, FAISS, and Groq (Llama 3.3 70B).
+
+Author: ResearchMind AI Team
+"""
+
+import os
+import subprocess
+import sys
 import streamlit as st
+
 from rag import ResearchAgent
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+DOCS_DIR = "documents"
+VECTOR_STORE_PATH = "vector_store/index.faiss"
+EMBEDDING_MODEL_NAME = "MiniLM-L6-v2"
+LLM_NAME = "Llama 3.3 70B"
+
+
+# ---------------------------------------------------------------------------
+# Page configuration
+# ---------------------------------------------------------------------------
+
 st.set_page_config(
-    page_title="AI Research Agent",
+    page_title="ResearchMind AI",
     page_icon="🔬",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("🔬 AI Research Agent")
-st.caption(
-    "Powered by FAISS • Groq Llama 3.3 • Semantic Search • Citations"
-)
-st.markdown("""
-Ask questions about the research papers in the knowledge base.
 
-The agent retrieves relevant documents and answers using only the retrieved context.
-""")
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
 
-
-class chat_message:
-    """A lightweight wrapper around Streamlit's chat UI."""
-
-    def __init__(self, role: str, content: str = ""):
-        self.role = role
-        self.content = content
-        self._message = None
-
-    def __enter__(self):
-        self._message = st.chat_message(self.role)
-        return self._message.__enter__()
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        if self._message is not None:
-            return self._message.__exit__(exc_type, exc_value, traceback)
-        return False
-
-    def render(self, content: str | None = None):
-        with self:
-            message = content if content is not None else self.content
-            if message:
-                st.markdown(message)
+def init_session_state() -> None:
+    """Initialize all keys used in st.session_state exactly once."""
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
 
-@st.cache_resource
-def load_agent():
+init_session_state()
+
+
+# ---------------------------------------------------------------------------
+# Agent loading (cached so it is not rebuilt on every rerun)
+# ---------------------------------------------------------------------------
+
+@st.cache_resource(show_spinner="Loading research agent...")
+def load_agent() -> ResearchAgent:
     return ResearchAgent()
 
+
 agent = load_agent()
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-st.sidebar.title("🔧 Control Panel")
 
-st.sidebar.header("📊 Project Statistics")
 
-st.sidebar.metric("Research Papers", "99")
-st.sidebar.metric("Pages", "2014")
-st.sidebar.metric("Chunks", "8522")
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
-st.sidebar.divider()
+def count_pdfs(directory: str) -> int:
+    """Return the number of PDF files in a directory (0 if missing)."""
+    if not os.path.isdir(directory):
+        return 0
+    return len([f for f in os.listdir(directory) if f.lower().endswith(".pdf")])
 
-st.sidebar.write("### 🤖 Model")
 
-st.sidebar.write("Embedding")
-st.sidebar.code("all-MiniLM-L6-v2")
+def save_uploaded_pdfs(files) -> int:
+    """Persist uploaded PDFs to DOCS_DIR and return how many were saved."""
+    os.makedirs(DOCS_DIR, exist_ok=True)
+    saved = 0
+    for pdf in files:
+        save_path = os.path.join(DOCS_DIR, pdf.name)
+        with open(save_path, "wb") as f:
+            f.write(pdf.getbuffer())
+        saved += 1
+    return saved
 
-st.sidebar.write("LLM")
-st.sidebar.code("Llama 3.3 70B")
 
-st.sidebar.write("Vector Database")
-st.sidebar.code("FAISS")
-uploaded_files = st.sidebar.file_uploader(
-    "📂 Upload Research Papers",
-    type=["pdf"],
-    accept_multiple_files=True
+def rebuild_vector_store() -> None:
+    """Run the vector-store build script and refresh the cached agent."""
+    subprocess.run(
+    [sys.executable, "build_vector_store.py"],
+    check=True
 )
+    load_agent.clear()
+    st.session_state.agent_reloaded = True
 
-if uploaded_files:
 
-    st.sidebar.success(
-        f"{len(uploaded_files)} PDF(s) uploaded."
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+
+st.title("🔬 ResearchMind AI")
+st.caption("Advanced Research Agent | FAISS | Groq | LangChain | Citations")
+st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.title("⚙️ Control Panel")
+    st.divider()
+
+    # --- Upload PDFs -------------------------------------------------------
+    st.subheader("📂 Upload PDFs")
+
+    uploaded_files = st.file_uploader(
+        "Upload Research Papers",
+        type=["pdf"],
+        accept_multiple_files=True,
     )
 
-    st.sidebar.info(
-        "Save them into the documents folder and rebuild the vector store."
+    if uploaded_files and st.button("💾 Save PDFs"):
+        saved_count = save_uploaded_pdfs(uploaded_files)
+        st.success(f"{saved_count} PDF(s) saved successfully.")
+
+    st.divider()
+
+    # --- Rebuild knowledge base ---------------------------------------------
+    if st.button("🔄 Rebuild Knowledge Base"):
+        with st.spinner("Building vector store..."):
+            try:
+                rebuild_vector_store()
+                st.success("Knowledge base updated!")
+            except subprocess.CalledProcessError as e:
+                st.error(f"Failed to build vector store: {e}")
+
+    st.divider()
+
+    # --- Statistics ----------------------------------------------------------
+    st.subheader("📊 Statistics")
+
+    paper_count = count_pdfs(DOCS_DIR)
+    vector_ready = "✅ Ready" if os.path.exists(VECTOR_STORE_PATH) else "❌ Not Built"
+
+    st.metric("Research Papers", paper_count)
+    st.metric("Vector Store", vector_ready)
+    st.metric("Embedding Model", EMBEDDING_MODEL_NAME)
+    st.metric("LLM", LLM_NAME)
+
+    st.divider()
+
+    # --- Pipeline overview -----------------------------------------------
+    st.subheader("🔄 Pipeline")
+    st.markdown(
+        """
+Question
+⬇️
+Embedding
+⬇️
+FAISS Search
+⬇️
+MMR Retrieval
+⬇️
+Groq LLM
+⬇️
+Answer + Citations
+"""
     )
+
+    st.divider()
+
+    if st.button("🗑 Clear Chat"):
+        st.session_state.messages = []
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Chat history
+# ---------------------------------------------------------------------------
 
 for message in st.session_state.messages:
-    chat_message(message["role"], message["content"]).render()
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-question = st.text_input(
-    "Enter your question:",
-    placeholder="Example: What is Retrieval-Augmented Generation?"
-)
 
-if st.button("Ask"):
+# ---------------------------------------------------------------------------
+# Chat input + response generation
+# ---------------------------------------------------------------------------
+
+question = st.chat_input("Ask a research question...")
+
+if question:
+    # Show and store the user message
+    st.session_state.messages.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    # Generate the answer
+    with st.spinner("🔍 Searching vector database and generating answer..."):
+        try:
+            result = agent.answer(question)
+        except Exception as e:
+            result = {"answer": f"⚠️ An error occurred: {e}", "citations": []}
+
+    # Display the assistant response
+    with st.chat_message("assistant"):
+        st.markdown(result["answer"])
+
+        citations = result.get("citations", [])
+        if citations:
+            st.markdown("---")
+            st.markdown("## 📚 Sources Used")
+            for citation in citations:
+                pages = ", ".join(str(page) for page in citation.get("pages", []))
+                with st.expander(f"📄 {citation['file']}"):
+                    st.write(f"**Pages:** {pages if pages else 'N/A'}")
+        else:
+            st.info("No supporting research documents were found.")
+
+    # Persist the assistant message
     st.session_state.messages.append(
-    {
-        "role": "user",
-        "content": question,
-    }
-)
+        {"role": "assistant", "content": result["answer"]}
+    )
 
-    if question.strip() == "":
-        st.warning("Please enter a question.")
-        st.stop()
 
-    with st.spinner("Searching research papers..."):
+# ---------------------------------------------------------------------------
+# Footer / project information
+# ---------------------------------------------------------------------------
 
-        result = agent.answer(question)
-        st.session_state.messages.append(
-    {
-        "role": "assistant",
-        "content": result["answer"],
-    }
-)
+st.divider()
 
-    st.subheader("Answer")
+col1, col2, col3 = st.columns(3)
 
-    st.info(result["answer"])
+with col1:
+    st.info(
+        """
+### 📚 Knowledge Base
+✔ Research Papers
+✔ Semantic Search
+✔ Citations
+"""
+    )
 
-    st.subheader("Sources")
+with col2:
+    st.success(
+        """
+### ⚡ AI Stack
+• LangChain
+• FAISS
+• Groq
+• Streamlit
+"""
+    )
 
-    if len(result["citations"]) == 0:
-        st.info("No relevant sources found.")
-    else:
-        for citation in result["citations"]:
-            pages = ", ".join(str(page) for page in citation["pages"])
+with col3:
+    st.warning(
+        f"""
+### 🧠 LLM
+Model
+{LLM_NAME}
 
-            with st.expander(f"📄 {citation['file']}"):
-                st.write(f"**Pages:** {pages if pages else 'N/A'}")
-                st.divider()
+Embedding
+{EMBEDDING_MODEL_NAME}
+"""
+    )
+
+st.divider()
 
 st.caption(
-    "Developed using FAISS, Groq, LangChain and Streamlit"
+    """
+🔬 **ResearchMind AI**
+
+Built using **Streamlit**, **LangChain**, **FAISS**, **Groq Llama 3.3**, and **Sentence Transformers**.
+
+This research agent retrieves relevant passages from research papers, generates grounded answers,
+provides citations, and clearly indicates when the supplied documents do not contain sufficient information.
+"""
 )
