@@ -68,11 +68,23 @@ Context:
         )
 
     def retrieve(self, question):
-
-        docs = self.vector_db.similarity_search_with_score(
-            question,
-            k=TOP_K,
+        retriever = self.vector_db.as_retriever(
+            search_type="mmr",
+            search_kwargs={
+                "k": TOP_K,
+                "fetch_k": 20,
+                "lambda_mult": 0.7,
+            },
         )
+
+        documents = retriever.invoke(question)
+        docs = []
+
+        for doc in documents:
+            score = doc.metadata.get("score")
+            if score is None:
+                score = 0.0
+            docs.append((doc, float(score)))
 
         return docs
 
@@ -82,39 +94,88 @@ Context:
 
         citations = []
 
+        seen = {}
+
         for document, score in docs:
 
             filename = os.path.basename(
                 document.metadata.get("source", "Unknown")
             )
 
-            citations.append(
-                {
-                    "file": filename,
-                    "score": round(float(score), 4),
-                }
-            )
+            page = document.metadata.get("page")
+            if page is None:
+                page = "Unknown"
+            else:
+                page = page + 1
 
+            # Build context for the LLM
             context += (
                 f"\n\nSOURCE: {filename}\n"
+                f"PAGE: {page}\n"
                 f"{document.page_content}\n"
+            )
+
+            # Deduplicate citations
+            if filename not in seen:
+                seen[filename] = {
+                    "file": filename,
+                    "pages": set(),
+                    "score": score,
+                }
+
+            if page != "Unknown":
+                seen[filename]["pages"].add(page)
+
+            # Keep the best (lowest) distance score
+            if score < seen[filename]["score"]:
+                seen[filename]["score"] = score
+
+        # Convert pages set to sorted list
+        for item in seen.values():
+
+            citations.append(
+                {
+                    "file": item["file"],
+                    "pages": sorted(list(item["pages"])),
+                }
             )
 
         return context, citations
 
     def answer(self, question):
+        # First check relevance using similarity search.
+        scored_docs = self.vector_db.similarity_search_with_score(
+            question,
+            k=3,
+        )
 
+        # If no documents are found, fail early with a clear response.
+        if not scored_docs:
+            return {
+                "answer": "The provided source documents do not contain enough information to answer this question.",
+                "citations": [],
+            }
+
+        # Lower score = better match (FAISS L2 distance).
+        best_score = scored_docs[0][1]
+
+        # Threshold (tune if needed).
+        if best_score > 1.2:
+            return {
+                "answer": "The provided source documents do not contain enough information to answer this question.",
+                "citations": [],
+            }
+
+        # Use MMR for better diversity and context coverage.
         docs = self.retrieve(question)
 
-        if len(docs) == 0:
-
+        if not docs:
             return {
                 "answer": "The provided source documents do not contain enough information to answer this question.",
                 "citations": [],
             }
 
         context, citations = self.build_context(docs)
-
         chain = self.prompt | self.llm
 
         response = chain.invoke(
@@ -128,7 +189,6 @@ Context:
             "answer": response.content,
             "citations": citations,
         }
-
 
 if __name__ == "__main__":
 
@@ -155,6 +215,12 @@ if __name__ == "__main__":
         print("=" * 80)
 
         for citation in result["citations"]:
+            pages = ", ".join(str(p) for p in citation["pages"])
             print(
-                f"{citation['file']} | similarity score: {citation['score']}"
+                f"""
+        File : {citation['file']}
+        Pages: {pages if pages else "N/A"}
+
+        ----------------------------------------------------
+        """
             )
